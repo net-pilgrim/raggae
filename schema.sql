@@ -307,3 +307,16 @@ begin
     return stats;
 end;
 $$;
+
+-- 10. Row Level Security (RLS) Policies
+alter table public.documents enable row level security;
+drop policy if exists "Allow service role full access on documents" on public.documents;
+create policy "Allow service role full access on documents" on public.documents for all to service_role using (true) with check (true);
+drop policy if exists "Allow anon full access on documents" on public.documents;
+create policy "Allow anon full access on documents" on public.documents for all to anon using (true) with check (true);
+
+alter table public.document_chunks enable row level security;
+drop policy if exists "Allow service role full access on document_chunks" on public.document_chunks;
+create policy "Allow service role full access on document_chunks" on public.document_chunks for all to service_role using (true) with check (true);
+drop policy if exists "Allow anon full access on document_chunks" on public.document_chunks;
+create policy "Allow anon full access on document_chunks" on public.document_chunks for all to anon using (true) with check (true);

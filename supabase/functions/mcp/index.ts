@@ -184,17 +184,17 @@ async function generateEmbeddingsBatch(
   const geminiKey = Deno.env.get("GEMINI_API_KEY") || Deno.env.get("GOOGLE_API_KEY");
   const openaiKey = Deno.env.get("OPENAI_API_KEY");
 
-  // 1. Google Gemini text-embedding-004 (batchEmbedContents endpoint)
+  // 1. Google Gemini gemini-embedding-001 (batchEmbedContents endpoint)
   if (geminiKey) {
     try {
       const requests = texts.map((t) => ({
-        model: "models/text-embedding-004",
+        model: "models/gemini-embedding-001",
         content: { parts: [{ text: t.replace(/\n/g, " ").trim() || " " }] },
         outputDimensionality: 768,
       }));
 
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key=${geminiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents?key=${geminiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

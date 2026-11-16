@@ -36,10 +36,10 @@ async function loadEnv() {
 
 // --- Token Bucket Rate Limiter ---
 class TokenBucketLimiter {
-  constructor(tps = 1.0, maxBurst = 2.0) {
+  constructor(rpm = 80, maxBurst = 20) {
     this.capacity = maxBurst;
     this.tokens = maxBurst;
-    this.fillRate = tps; // tokens per second
+    this.fillRate = rpm / 60.0; // chunks allowed per second (e.g. 80 / 60 = 1.333)
     this.lastCheck = performance.now();
   }
 
@@ -58,8 +58,13 @@ class TokenBucketLimiter {
       // Wait until enough tokens are replenished
       const needed = cost - this.tokens;
       const waitMs = Math.ceil((needed / this.fillRate) * 1000);
-      await new Promise((resolve) => setTimeout(resolve, Math.max(waitMs, 50)));
+      await new Promise((resolve) => setTimeout(resolve, Math.max(waitMs, 100)));
     }
+  }
+
+  reset() {
+    this.tokens = 0;
+    this.lastCheck = performance.now();
   }
 }
 
@@ -156,22 +161,21 @@ async function batchEmbedGemini(texts, geminiKey, limiter) {
   if (texts.length === 0) return [];
 
   let attempts = 0;
-  const maxAttempts = 5;
-  let backoffMs = 1500;
+  const maxAttempts = 20;
 
   while (attempts < maxAttempts) {
-    // Acquire rate limit token before network call
-    await limiter.acquire(1.0);
+    // Acquire tokens equivalent to the number of chunks in this batch
+    await limiter.acquire(texts.length);
 
     try {
       const requests = texts.map((t) => ({
-        model: "models/text-embedding-004",
+        model: "models/gemini-embedding-001",
         content: { parts: [{ text: t.replace(/\n/g, " ").trim() || " " }] },
         outputDimensionality: 768,
       }));
 
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key=${geminiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents?key=${geminiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -187,11 +191,27 @@ async function batchEmbedGemini(texts, geminiKey, limiter) {
 
       if (res.status === 429) {
         attempts++;
-        const retryAfter = res.headers.get("retry-after");
-        const sleepDuration = retryAfter ? parseInt(retryAfter, 10) * 1000 : backoffMs;
-        console.warn(`⚠️  Gemini 429 Rate Limit (Free Tier). Backing off for ${Math.round(sleepDuration / 1000)}s (attempt ${attempts}/${maxAttempts})...`);
-        await new Promise((r) => setTimeout(r, sleepDuration));
-        backoffMs *= 2;
+        const rawBody = await res.text();
+        let sleepSec = 30; // default safe backoff
+
+        try {
+          const parsed = JSON.parse(rawBody);
+          // Try finding retryDelay in details
+          const retryInfo = (parsed.error?.details || []).find((d) => d["@type"]?.includes("RetryInfo"));
+          if (retryInfo?.retryDelay) {
+            sleepSec = parseFloat(retryInfo.retryDelay.replace("s", "")) + 2;
+          } else {
+            // Try regex in message
+            const match = parsed.error?.message?.match(/retry in ([0-9.]+)s/i);
+            if (match && match[1]) {
+              sleepSec = parseFloat(match[1]) + 2;
+            }
+          }
+        } catch (_) {}
+
+        limiter.reset();
+        process.stdout.write(`\n⚠️  Gemini Free Tier 100 RPM hit. Pausing for ${Math.round(sleepSec)}s (attempt ${attempts}/${maxAttempts})...\n`);
+        await new Promise((r) => setTimeout(r, sleepSec * 1000));
         continue;
       }
 
@@ -200,9 +220,8 @@ async function batchEmbedGemini(texts, geminiKey, limiter) {
       return texts.map(() => null);
     } catch (err) {
       attempts++;
-      console.warn(`Network glitch: ${err.message}. Retrying in ${backoffMs}ms...`);
-      await new Promise((r) => setTimeout(r, backoffMs));
-      backoffMs *= 2;
+      console.warn(`Network glitch: ${err.message}. Retrying in 5s...`);
+      await new Promise((r) => setTimeout(r, 5000));
     }
   }
 
@@ -286,8 +305,8 @@ async function cmdIngest(targetPath, flags) {
     console.warn("⚠️  Warning: GEMINI_API_KEY is not set. Chunks will be stored without vector embeddings (FTS keyword search only).");
   }
 
-  const tps = parseFloat(flags.tps || process.env.RAGGAE_TPS || "1.5");
-  const batchSize = parseInt(flags["batch-size"] || process.env.RAGGAE_BATCH_SIZE || "25", 10);
+  const rpm = parseFloat(flags.rpm || process.env.RAGGAE_RPM || "80");
+  const batchSize = parseInt(flags["batch-size"] || process.env.RAGGAE_BATCH_SIZE || "15", 10);
   const chunkSize = parseInt(flags["chunk-size"] || "1000", 10);
   const chunkOverlap = parseInt(flags["chunk-overlap"] || "150", 10);
   const collection = flags.collection || "default";
@@ -296,12 +315,12 @@ async function cmdIngest(targetPath, flags) {
   console.log(`--------------------------------------------------`);
   console.log(`Target:       ${targetPath}`);
   console.log(`Collection:   ${collection}`);
-  console.log(`Rate Control: ${tps} TPS (Token Bucket)`);
+  console.log(`Rate Control: ${rpm} RPM max (strictly capped under 100 RPM free tier)`);
   console.log(`Batch Size:   ${batchSize} chunks/req`);
   console.log(`Chunk Size:   ${chunkSize} chars (overlap: ${chunkOverlap})`);
   console.log(`--------------------------------------------------\n`);
 
-  const limiter = new TokenBucketLimiter(tps, tps * 2);
+  const limiter = new TokenBucketLimiter(rpm, batchSize * 1.5);
   const db = !isDryRun ? new SupabaseHttp(supabaseUrl, supabaseKey, limiter) : null;
 
   // Discover files
@@ -361,55 +380,26 @@ async function cmdIngest(targetPath, flags) {
     // 3. Compute chunk hashes
     const chunkHashes = chunks.map((c) => sha256(c));
 
-    // 4. Check embedding cache in DB (reuse existing vectors to stay well below API limits!)
-    const cachedChunks = await db.request(
-      `document_chunks?content_hash=in.(${chunkHashes.map((h) => `"${h}"`).join(",")})&embedding=not.is.null&select=content_hash,embedding`
-    );
-
+    // 4. Check embedding cache in DB (reuse existing vectors in sub-batches to stay below URL length caps)
     const embeddingCache = new Map();
-    if (cachedChunks) {
-      for (const item of cachedChunks) {
-        if (item.content_hash && item.embedding) {
-          embeddingCache.set(item.content_hash, item.embedding);
+    const hashBatchSize = 40;
+    for (let h = 0; h < chunkHashes.length; h += hashBatchSize) {
+      const hashSlice = chunkHashes.slice(h, h + hashBatchSize);
+      const cachedChunks = await db.request(
+        `document_chunks?content_hash=in.(${hashSlice.map((s) => `"${s}"`).join(",")})&embedding=not.is.null&select=content_hash,embedding`
+      );
+      if (cachedChunks) {
+        for (const item of cachedChunks) {
+          if (item.content_hash && item.embedding) {
+            embeddingCache.set(item.content_hash, item.embedding);
+          }
         }
       }
     }
 
-    // 5. Embed uncached chunks in rate-controlled batches
-    const uncachedIndices = [];
-    const uncachedTexts = [];
-    chunks.forEach((chunkText, idx) => {
-      const hash = chunkHashes[idx];
-      if (!embeddingCache.has(hash)) {
-        uncachedIndices.push(idx);
-        uncachedTexts.push(chunkText);
-      }
-    });
-
-    const newlyEmbedded = new Array(chunks.length).fill(null);
-
-    if (geminiKey && uncachedTexts.length > 0) {
-      for (let b = 0; b < uncachedTexts.length; b += batchSize) {
-        const sliceTexts = uncachedTexts.slice(b, b + batchSize);
-        const sliceIndices = uncachedIndices.slice(b, b + batchSize);
-        const embeddings = await batchEmbedGemini(sliceTexts, geminiKey, limiter);
-
-        embeddings.forEach((emb, eIdx) => {
-          if (emb) {
-            newlyEmbedded[sliceIndices[eIdx]] = emb;
-            embeddingCache.set(chunkHashes[sliceIndices[eIdx]], emb);
-            totalChunksEmbedded++;
-          }
-        });
-      }
-    }
-
-    totalChunksReused += chunks.length - uncachedTexts.length;
-
-    // 6. Upsert document in database
-    const existingDoc = await db.request(`documents?collection=eq.${encodeURIComponent(collection)}&source_uri=eq.${encodeURIComponent(relPath)}&select=id`);
+    // 5. Upsert document in database first (to obtain docId for streaming chunk saves)
+    const existingDoc = await db.request(`documents?collection=eq.${encodeURIComponent(collection)}&source_uri=eq.${encodeURIComponent(relPath)}&select=id,content_hash`);
     let docId;
-
     const estTokens = Math.round(content.length / 4);
 
     if (existingDoc && existingDoc.length > 0) {
@@ -419,13 +409,9 @@ async function cmdIngest(targetPath, flags) {
         body: JSON.stringify({
           title,
           content_hash: docHash,
-          total_chunks: chunks.length,
-          total_tokens: estTokens,
           metadata: { file_ext: path.extname(filePath), size_bytes: content.length },
         }),
       });
-      // Delete old chunks
-      await db.request(`document_chunks?document_id=eq.${docId}`, { method: "DELETE" });
     } else {
       const inserted = await db.request(`documents`, {
         method: "POST",
@@ -434,7 +420,7 @@ async function cmdIngest(targetPath, flags) {
           title,
           source_uri: relPath,
           content_hash: docHash,
-          total_chunks: chunks.length,
+          total_chunks: 0,
           total_tokens: estTokens,
           metadata: { file_ext: path.extname(filePath), size_bytes: content.length },
         }),
@@ -442,33 +428,84 @@ async function cmdIngest(targetPath, flags) {
       docId = inserted[0]?.id;
     }
 
-    // 7. Insert chunk rows in DB
-    const chunkRows = chunks.map((chunkText, idx) => {
-      const hash = chunkHashes[idx];
-      const emb = embeddingCache.get(hash) || newlyEmbedded[idx] || null;
-      return {
-        document_id: docId,
-        chunk_index: idx,
-        content: chunkText,
-        content_hash: hash,
-        token_count: Math.round(chunkText.length / 4),
-        metadata: { chunk_index: idx, source_file: relPath },
-        embedding: emb,
-      };
+    // Check which chunk indices are already stored (makes ingestion 100% resumable)
+    const existingChunks = await db.request(`document_chunks?document_id=eq.${docId}&select=chunk_index`);
+    const alreadySavedIndices = new Set((existingChunks || []).map((c) => c.chunk_index));
+
+    const missingChunks = [];
+    chunks.forEach((chunkText, idx) => {
+      if (!alreadySavedIndices.has(idx)) {
+        missingChunks.push({ idx, text: chunkText, hash: chunkHashes[idx] });
+      }
     });
 
-    // Sub-batch DB insertion to avoid hitting request payload caps
-    for (let c = 0; c < chunkRows.length; c += 50) {
-      const batchRows = chunkRows.slice(c, c + 50);
-      await db.request(`document_chunks`, {
-        method: "POST",
-        body: JSON.stringify(batchRows),
-      });
+    if (alreadySavedIndices.size > 0) {
+      process.stdout.write(`(Resuming: ${alreadySavedIndices.size}/${chunks.length} chunks already stored)\n`);
     }
 
-    totalChunksIngested += chunks.length;
+    // 6. Embed and persist missing chunks in rate-controlled batches
+    for (let b = 0; b < missingChunks.length; b += batchSize) {
+      const slice = missingChunks.slice(b, b + batchSize);
+      const sliceToEmbed = [];
+      const sliceToEmbedIndices = [];
+
+      slice.forEach((item, sIdx) => {
+        if (!embeddingCache.has(item.hash)) {
+          sliceToEmbed.push(item.text);
+          sliceToEmbedIndices.push(sIdx);
+        }
+      });
+
+      let embeddings = [];
+      if (geminiKey && sliceToEmbed.length > 0) {
+        embeddings = await batchEmbedGemini(sliceToEmbed, geminiKey, limiter);
+        embeddings.forEach((emb, eIdx) => {
+          if (emb) {
+            const origItem = slice[sliceToEmbedIndices[eIdx]];
+            embeddingCache.set(origItem.hash, emb);
+            totalChunksEmbedded++;
+          }
+        });
+      }
+
+      totalChunksReused += slice.length - sliceToEmbed.length;
+
+      const chunkRows = slice.map((item) => {
+        const emb = embeddingCache.get(item.hash) || null;
+        return {
+          document_id: docId,
+          chunk_index: item.idx,
+          content: item.text,
+          content_hash: item.hash,
+          token_count: Math.round(item.text.length / 4),
+          metadata: { chunk_index: item.idx, source_file: relPath },
+          embedding: emb,
+        };
+      });
+
+      // Persist this batch immediately to Supabase
+      await db.request(`document_chunks`, {
+        method: "POST",
+        body: JSON.stringify(chunkRows),
+      });
+
+      totalChunksIngested += slice.length;
+      const progressCount = alreadySavedIndices.size + b + slice.length;
+      const pct = Math.round((progressCount / chunks.length) * 100);
+      process.stdout.write(`\r[${i + 1}/${filePaths.length}] ${relPath} ... Progress: ${progressCount}/${chunks.length} chunks (${pct}%)`);
+    }
+
+    // 7. Finalize document total_chunks
+    await db.request(`documents?id=eq.${docId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        total_chunks: chunks.length,
+        total_tokens: estTokens,
+      }),
+    });
+
     totalDocsProcessed++;
-    process.stdout.write(`✅ Indexed (${chunks.length} chunks, ${chunks.length - uncachedTexts.length} cached)\n`);
+    process.stdout.write(`\n✅ Indexed ${relPath} (${chunks.length} chunks, ${totalChunksEmbedded} newly embedded, ${chunks.length - totalChunksEmbedded} cached)\n`);
   }
 
   const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
@@ -611,8 +648,8 @@ Commands:
 
 Flags:
   --collection <name>    Namespace/collection partition (default: 'default')
-  --tps <rate>           Target transactions per second for rate control (default: 1.5)
-  --batch-size <num>     Embedding batch size per API call (default: 25)
+  --rpm <rate>           Max embedding requests per minute (default: 80, cap under 100)
+  --batch-size <num>     Embedding batch size per API call (default: 15)
   --chunk-size <chars>   Max characters per chunk (default: 1000)
   --chunk-overlap <num>  Overlap between consecutive chunks (default: 150)
   --limit <num>          Max results to return in search (default: 5)
