@@ -308,10 +308,15 @@ class SupabaseHttp {
 
 // --- CLI Commands ---
 
+function getBestSupabaseKey() {
+  const candidateKeys = [process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.SUPABASE_KEY].filter(Boolean);
+  return candidateKeys.find((k) => k.startsWith("sb_secret_") || !k.startsWith("sb_publish")) || candidateKeys[0];
+}
+
 async function cmdIngest(targetPath, flags) {
   const isDryRun = Boolean(flags["dry-run"]);
   const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  const supabaseKey = getBestSupabaseKey();
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 
   if (!isDryRun && (!supabaseUrl || !supabaseKey)) {
@@ -541,7 +546,7 @@ async function cmdIngest(targetPath, flags) {
 
 async function cmdSearch(query, flags) {
   const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  const supabaseKey = getBestSupabaseKey();
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 
   if (!supabaseUrl || !supabaseKey) {
@@ -587,7 +592,7 @@ async function cmdSearch(query, flags) {
 
 async function cmdStats() {
   const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  const supabaseKey = getBestSupabaseKey();
 
   if (!supabaseUrl || !supabaseKey) {
     console.error("❌ Error: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set.");
@@ -619,7 +624,7 @@ async function cmdStats() {
 
 async function cmdList(flags) {
   const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+  const supabaseKey = getBestSupabaseKey();
 
   if (!supabaseUrl || !supabaseKey) {
     console.error("❌ Error: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set.");
