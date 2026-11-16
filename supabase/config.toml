@@ -1,0 +1,3 @@
+# Supabase configuration for Edge Functions
+[functions.mcp]
+verify_jwt = false

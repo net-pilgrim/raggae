@@ -1,0 +1,41 @@
+{
+  "name": "rag_ingest_document",
+  "description": "Ingest a document or text content into the RAG store with automatic chunking, deduplication, and embedding",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "description": "Document title or file identifier"
+      },
+      "content": {
+        "type": "string",
+        "description": "Full document text (Markdown, source code, text)"
+      },
+      "collection": {
+        "type": "string",
+        "description": "Target collection/namespace",
+        "default": "default"
+      },
+      "source_uri": {
+        "type": "string",
+        "description": "Source URL or file path"
+      },
+      "chunk_size": {
+        "type": "number",
+        "description": "Max characters per chunk",
+        "default": 1000
+      },
+      "chunk_overlap": {
+        "type": "number",
+        "description": "Character overlap between consecutive chunks",
+        "default": 150
+      },
+      "metadata": {
+        "type": "object",
+        "description": "Arbitrary JSON metadata for document and chunks"
+      }
+    },
+    "required": ["title", "content"]
+  }
+}

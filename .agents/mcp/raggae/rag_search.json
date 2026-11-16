@@ -1,0 +1,33 @@
+{
+  "name": "rag_search",
+  "description": "Search indexed knowledge using hybrid vector similarity and keyword full-text search with metadata filters",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Search query or natural language question"
+      },
+      "collection": {
+        "type": "string",
+        "description": "Optional collection/namespace filter (e.g. 'docs', 'code', 'research')"
+      },
+      "limit": {
+        "type": "number",
+        "description": "Max number of chunks to return",
+        "default": 8
+      },
+      "match_threshold": {
+        "type": "number",
+        "description": "Minimum cosine similarity threshold (0.0 to 1.0)",
+        "default": 0.2
+      },
+      "hybrid": {
+        "type": "boolean",
+        "description": "Whether to run hybrid retrieval (Vector + Full-Text) or vector only",
+        "default": true
+      }
+    },
+    "required": ["query"]
+  }
+}

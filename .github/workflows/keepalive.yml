@@ -1,0 +1,32 @@
+name: Supabase Free Tier Keep-Alive
+
+on:
+  schedule:
+    # Run every Monday and Thursday at 06:00 UTC to prevent 7-day auto-pause
+    - cron: "0 6 * * 1,4"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    name: Ping Supabase Health Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Raggae Edge Function
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "::warning::SUPABASE_URL secret not configured. Skipping keep-alive ping."
+            exit 0
+          fi
+          KEY="${SUPABASE_SERVICE_ROLE_KEY:-$SUPABASE_ANON_KEY}"
+          echo "Pinging Raggae health endpoint at $SUPABASE_URL/functions/v1/mcp/health..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "apikey: $KEY" -H "Authorization: Bearer $KEY" "$SUPABASE_URL/functions/v1/mcp/health")
+          echo "Response HTTP Status: $STATUS"
+          if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
+            echo "✅ Keep-alive ping successful. Supabase database kept active!"
+          else
+            echo "⚠️ Health check returned status $STATUS. Check your Supabase project status."
+          fi

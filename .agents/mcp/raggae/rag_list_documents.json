@@ -1,0 +1,18 @@
+{
+  "name": "rag_list_documents",
+  "description": "List indexed documents, chunk counts, collections, and storage timestamps",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "collection": {
+        "type": "string",
+        "description": "Optional collection filter"
+      },
+      "limit": {
+        "type": "number",
+        "description": "Max documents to return",
+        "default": 25
+      }
+    }
+  }
+}

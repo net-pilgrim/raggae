@@ -1,0 +1,26 @@
+{
+  "name": "raggae",
+  "version": "1.0.0",
+  "description": "Serverless, Free-Tier RAG Engine on Supabase Edge & pgvector with Token-Bucket Rate Control",
+  "main": "bin/raggae.mjs",
+  "bin": {
+    "raggae": "./bin/raggae.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "node ./bin/raggae.mjs",
+    "test": "node ./bin/raggae.mjs --help"
+  },
+  "keywords": [
+    "rag",
+    "supabase",
+    "pgvector",
+    "gemini",
+    "mcp",
+    "rate-limiting",
+    "free-tier",
+    "embeddings"
+  ],
+  "author": "Antigravity",
+  "license": "MIT"
+}

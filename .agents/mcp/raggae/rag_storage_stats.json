@@ -1,0 +1,8 @@
+{
+  "name": "rag_storage_stats",
+  "description": "Check database storage metrics, chunk counts, and Supabase 500MB free tier capacity",
+  "inputSchema": {
+    "type": "object",
+    "properties": {}
+  }
+}
