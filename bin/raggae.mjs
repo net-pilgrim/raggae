@@ -34,36 +34,53 @@ async function loadEnv() {
   }
 }
 
-// --- Token Bucket Rate Limiter ---
-class TokenBucketLimiter {
-  constructor(rpm = 80, maxBurst = 20) {
-    this.capacity = maxBurst;
-    this.tokens = maxBurst;
-    this.fillRate = rpm / 60.0; // chunks allowed per second (e.g. 80 / 60 = 1.333)
+// --- Dual Token Bucket Rate Limiter (RPM & TPM) ---
+class DualRateLimiter {
+  constructor(rpm = 80, tpm = 24000) {
+    this.rpm = rpm;
+    this.tpm = tpm;
+
+    this.rpmCapacity = 15;
+    this.rpmTokens = 15;
+    this.rpmFillRate = rpm / 60.0; // chunks per second (e.g. 80 / 60 = 1.33 chunks/s)
+
+    this.tpmCapacity = 4000;
+    this.tpmTokens = 4000;
+    this.tpmFillRate = tpm / 60.0; // tokens per second (e.g. 24000 / 60 = 400 tokens/s)
+
     this.lastCheck = performance.now();
   }
 
-  async acquire(cost = 1.0) {
+  async acquire(chunksCount, tokensCount = 0) {
     while (true) {
       const now = performance.now();
       const elapsedSec = (now - this.lastCheck) / 1000.0;
       this.lastCheck = now;
-      this.tokens = Math.min(this.capacity, this.tokens + elapsedSec * this.fillRate);
 
-      if (this.tokens >= cost) {
-        this.tokens -= cost;
+      this.rpmTokens = Math.min(this.rpmCapacity, this.rpmTokens + elapsedSec * this.rpmFillRate);
+      this.tpmTokens = Math.min(this.tpmCapacity, this.tpmTokens + elapsedSec * this.tpmFillRate);
+
+      if (this.rpmTokens >= chunksCount && this.tpmTokens >= tokensCount) {
+        this.rpmTokens -= chunksCount;
+        this.tpmTokens -= tokensCount;
         return;
       }
 
-      // Wait until enough tokens are replenished
-      const needed = cost - this.tokens;
-      const waitMs = Math.ceil((needed / this.fillRate) * 1000);
-      await new Promise((resolve) => setTimeout(resolve, Math.max(waitMs, 100)));
+      const rpmWaitMs = this.rpmTokens < chunksCount
+        ? Math.ceil(((chunksCount - this.rpmTokens) / this.rpmFillRate) * 1000)
+        : 0;
+      const tpmWaitMs = this.tpmTokens < tokensCount
+        ? Math.ceil(((tokensCount - this.tpmTokens) / this.tpmFillRate) * 1000)
+        : 0;
+
+      const waitMs = Math.max(rpmWaitMs, tpmWaitMs, 100);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
   }
 
   reset() {
-    this.tokens = 0;
+    this.rpmTokens = 0;
+    this.tpmTokens = 0;
     this.lastCheck = performance.now();
   }
 }
@@ -160,12 +177,13 @@ async function findFilesRecursively(dirPath, extensions = null) {
 async function batchEmbedGemini(texts, geminiKey, limiter) {
   if (texts.length === 0) return [];
 
+  const estTokens = texts.reduce((sum, t) => sum + Math.round(t.length / 4), 0);
   let attempts = 0;
   const maxAttempts = 20;
 
   while (attempts < maxAttempts) {
-    // Acquire tokens equivalent to the number of chunks in this batch
-    await limiter.acquire(texts.length);
+    // Acquire tokens checking both RPM (chunks) and TPM (tokens)
+    await limiter.acquire(texts.length, estTokens);
 
     try {
       const requests = texts.map((t) => ({
@@ -306,7 +324,8 @@ async function cmdIngest(targetPath, flags) {
   }
 
   const rpm = parseFloat(flags.rpm || process.env.RAGGAE_RPM || "80");
-  const batchSize = parseInt(flags["batch-size"] || process.env.RAGGAE_BATCH_SIZE || "15", 10);
+  const tpm = parseFloat(flags.tpm || process.env.RAGGAE_TPM || "24000");
+  const batchSize = parseInt(flags["batch-size"] || process.env.RAGGAE_BATCH_SIZE || "10", 10);
   const chunkSize = parseInt(flags["chunk-size"] || "1000", 10);
   const chunkOverlap = parseInt(flags["chunk-overlap"] || "150", 10);
   const collection = flags.collection || "default";
@@ -315,12 +334,12 @@ async function cmdIngest(targetPath, flags) {
   console.log(`--------------------------------------------------`);
   console.log(`Target:       ${targetPath}`);
   console.log(`Collection:   ${collection}`);
-  console.log(`Rate Control: ${rpm} RPM max (strictly capped under 100 RPM free tier)`);
+  console.log(`Rate Control: ${rpm} RPM (cap < 100) & ${tpm} TPM (cap < 30,000)`);
   console.log(`Batch Size:   ${batchSize} chunks/req`);
   console.log(`Chunk Size:   ${chunkSize} chars (overlap: ${chunkOverlap})`);
   console.log(`--------------------------------------------------\n`);
 
-  const limiter = new TokenBucketLimiter(rpm, batchSize * 1.5);
+  const limiter = new DualRateLimiter(rpm, tpm);
   const db = !isDryRun ? new SupabaseHttp(supabaseUrl, supabaseKey, limiter) : null;
 
   // Discover files
