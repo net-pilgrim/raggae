@@ -109,7 +109,7 @@ begin
       and (filter_document_id is null or c.document_id = filter_document_id)
       and (filter_metadata is null or c.metadata @> filter_metadata)
       and (1 - (c.embedding <=> query_embedding)) >= match_threshold
-    order to c.embedding <=> query_embedding
+    order by c.embedding <=> query_embedding
     limit match_count;
 end;
 $$;
