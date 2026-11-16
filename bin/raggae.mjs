@@ -34,7 +34,36 @@ async function loadEnv() {
   }
 }
 
-// --- Dual Token Bucket Rate Limiter (RPM & TPM) ---
+// --- Simple Token Bucket Limiter (for DB & General Queries) ---
+class SimpleRateLimiter {
+  constructor(tps = 5.0) {
+    this.capacity = tps * 2;
+    this.tokens = tps;
+    this.fillRate = tps;
+    this.lastCheck = performance.now();
+  }
+
+  async acquire(cost = 1.0) {
+    while (true) {
+      const now = performance.now();
+      const elapsedSec = (now - this.lastCheck) / 1000.0;
+      this.lastCheck = now;
+      this.tokens = Math.min(this.capacity, this.tokens + elapsedSec * this.fillRate);
+
+      if (this.tokens >= cost) {
+        this.tokens -= cost;
+        return;
+      }
+
+      const needed = cost - this.tokens;
+      const waitMs = Math.ceil((needed / this.fillRate) * 1000);
+      await new Promise((resolve) => setTimeout(resolve, Math.max(waitMs, 50)));
+    }
+  }
+}
+const TokenBucketLimiter = SimpleRateLimiter;
+
+// --- Dual Token Bucket Rate Limiter (RPM & TPM for Embeddings) ---
 class DualRateLimiter {
   constructor(rpm = 80, tpm = 24000) {
     this.rpm = rpm;
